@@ -1,0 +1,6 @@
+mode: hybrid
+K: 50
+alpha_mode: adaptive
+alpha_fixed: 0.5
+prior_path: checkpoints/prior_bank.pt
+log_alpha: true

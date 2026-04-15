@@ -19,6 +19,8 @@ from tqdm import tqdm
 from aug_funcs import rot_img, translation_img, hflip_img, grey_img, rot90_img
 import torch.backends.cudnn as cudnn
 from adeval import  EvalAccumulatorCuda
+from fusion import compute_distance, distances_to_map, fuse_distances
+from prototypes.loader import load_prior_bank
 
 
 def ader_evaluator(pr_px, pr_sp, gt_px, gt_sp, use_metrics = ['I-AUROC', 'I-AP', 'I-F1_max','P-AUROC', 'P-AP', 'P-F1_max', 'AUPRO']):
@@ -221,19 +223,65 @@ def save_imag_ZS(imgs, anomaly_map, gt, prototype_map, save_root, img_path):
         plt.imsave(os.path.join(save_root, class_name, category, fr'{idx_name}_3.png'), distance, cmap='jet')
         plt.close()
 
-def evaluation_batch(model, dataloader, device, _class_=None, max_ratio=0, resize_mask=None):
+def evaluation_batch(
+        model,
+        dataloader,
+        device,
+        _class_=None,
+        max_ratio=0,
+        resize_mask=None,
+        mode='inp',
+        prior_path=None,
+        alpha_mode='adaptive',
+        alpha_fixed=0.5,
+        alpha_log_list=None,
+):
     model.eval()
     gt_list_px = []
     pr_list_px = []
     gt_list_sp = []
     pr_list_sp = []
+    prior_bank = None
+    if mode in ['prior', 'hybrid']:
+        if prior_path is None:
+            raise ValueError("prior_path is required when mode is 'prior' or 'hybrid'.")
+        prior_bank = load_prior_bank(prior_path=prior_path, device=device)
+
     gaussian_kernel = get_gaussian_kernel(kernel_size=5, sigma=4).to(device)
     with torch.no_grad():
         for img, gt, label, img_path in tqdm(dataloader, ncols=80):
             img = img.to(device)
-            output = model(img)
-            en, de = output[0], output[1]
-            anomaly_map, _ = cal_anomaly_maps(en, de, img.shape[-1])
+            if mode == 'inp':
+                output = model(img)
+                en, de = output[0], output[1]
+                anomaly_map, _ = cal_anomaly_maps(en, de, img.shape[-1])
+            else:
+                output = model(img, return_tokens=True)
+                patch_tokens = output[3]
+                intrinsic_proto = output[4]
+
+                d_in = compute_distance(patch_tokens, intrinsic_proto)
+                d_pr = compute_distance(patch_tokens, prior_bank)
+                d_final, alpha = fuse_distances(
+                    d_in,
+                    d_pr,
+                    mode=mode,
+                    alpha_mode=alpha_mode,
+                    alpha_fixed=alpha_fixed,
+                    P_in=intrinsic_proto,
+                )
+                if alpha_log_list is not None:
+                    if torch.is_tensor(alpha):
+                        if alpha.dim() == 0:
+                            alpha_log_list.append(alpha.detach().cpu().item())
+                        else:
+                            alpha_log_list.extend(alpha.detach().cpu().numpy().tolist())
+                    else:
+                        alpha_log_list.append(float(alpha))
+
+                anomaly_map = distances_to_map(d_final)
+                anomaly_map = F.interpolate(anomaly_map, size=img.shape[-1], mode='bilinear', align_corners=True)
+
             if resize_mask is not None:
                 anomaly_map = F.interpolate(anomaly_map, size=resize_mask, mode='bilinear', align_corners=False)
                 gt = F.interpolate(gt, size=resize_mask, mode='nearest')

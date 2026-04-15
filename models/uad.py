@@ -40,7 +40,7 @@ class INP_Former(nn.Module):
         gather_loss = self.distance.mean()
         return gather_loss
 
-    def forward(self, x):
+    def forward(self, x, return_tokens=False):
         x = self.encoder.prepare_tokens(x)
         B, L, _ = x.shape
         en_list = []
@@ -85,6 +85,8 @@ class INP_Former(nn.Module):
 
         en = [e.permute(0, 2, 1).reshape([x.shape[0], -1, side, side]).contiguous() for e in en]
         de = [d.permute(0, 2, 1).reshape([x.shape[0], -1, side, side]).contiguous() for d in de]
+        if return_tokens:
+            return en, de, g_loss, x, agg_prototype
         return en, de, g_loss
 
     def fuse_feature(self, feat_list):
